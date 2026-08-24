@@ -25,6 +25,7 @@ Two problems that a naive version of this analysis gets wrong, and that this pro
 - `scripts/shap_plausibility.py` checks what the "combined" ElasticNet actually learned: SHAP values (`shap.LinearExplainer`) plus a direct nonzero-coefficient count, checked against a reference list of IBD-associated taxa from the literature (Enterobacteriaceae and *R. gnavus* overrepresentation, depleted butyrate producers, per Lloyd-Price et al. 2019). It found that the cross-validated hyperparameter search prefers pure-Lasso regularization strong enough to zero out nearly every species coefficient, 0 of 123 nonzero for Crohn's and 2 of 121 for UC.
 - `src/flare_forecast/ecology.py` computes a real dysbiosis score (median Bray-Curtis dissimilarity to a 429-sample, 27-subject non-IBD reference cohort, the same construct Lloyd-Price et al. used, reimplemented here since per-sample scores are not in the raw downloads), plus Shannon diversity and species richness, as a roughly 7-feature alternative to 578 raw species competing for signal at 51-83 training subjects.
 - Every model comparison and the SHAP audit results get written to `results/forecast.json`, so they can be checked later instead of just printed and lost.
+- `scripts/trajectory_viewer.py` plots `score_regression`'s predictions against real activity-score timelines for held-out subjects, not a microbiome model, since that is the model that actually won the comparison. It picks three subjects by leave-one-subject-out mean absolute error: best, median, and worst, so the figure cannot be read as a cherry-picked good example.
 
 ## Tech Stack
 
@@ -88,13 +89,15 @@ flare-forecast/
 │   ├── eda.py                 # Feature/sample-count audit; resolves the single- vs multi-omic call
 │   ├── train_baseline.py      # Same-timepoint HBI/SCCAI regression (cross-sectional baseline)
 │   ├── train_forecast.py      # 2-4wk-ahead forecast: persistence vs. score-only vs. species vs. ecology
-│   └── shap_plausibility.py   # SHAP + coefficient audit of what the "combined" model actually learned
+│   ├── shap_plausibility.py   # SHAP + coefficient audit of what the "combined" model actually learned
+│   └── trajectory_viewer.py   # Predicted vs. actual score_regression trajectories, held-out subjects
 ├── src/flare_forecast/
 │   ├── data.py                 # Metadata/taxonomy loading, dataset builders, (t, t+1) pair construction
 │   ├── features.py             # PrevalenceFilter, ArcsinSqrtTransform (compositional preprocessing)
 │   └── ecology.py              # Shannon diversity, richness, Bray-Curtis dysbiosis score
 ├── results/
-│   └── forecast.json           # LOSO R^2/MAE per model, written by train_forecast.py
+│   ├── forecast.json           # LOSO R^2/MAE per model, written by train_forecast.py
+│   └── trajectories/           # PNGs written by trajectory_viewer.py
 ├── data/
 │   ├── raw/                    # Downloaded HMP2 source tables (gitignored, ~281MB)
 │   └── processed/              # Reserved for derived artifacts (unused so far)
@@ -123,6 +126,13 @@ This was not the first framing tried. An earlier run reported that the combined 
 The ecology feature set came afterward, built on the idea that 578 raw species might simply be too high-dimensional for 51-83 subjects to find signal in, even if that signal exists. Checking its fitted coefficients directly shows the same pattern: mostly zero, with small weight on one to three ecology features and dominant weight on score_t. For CD, the score_t coefficient is 1.45 against a dysbiosis_t of -0.08, with everything else at exactly zero. For UC, score_t sits at 1.20 against three small nonzero ecology terms. Two different feature representations, raw species and derived ecology, arrived at the same conclusion.
 
 A few caveats apply regardless of the exact numbers above. 51-83 training subjects per diagnosis means every LOSO fold is a substantial share of the data, so reported R² carries real variance. HBI and SCCAI are noisy self-report clinical instruments, not lab measurements, which caps how predictable they can be from any input. And the source paper for this cohort never reports a forecasting R² to compare against, since it is a cross-sectional analysis. There is no strong external number for what "good" looks like here.
+
+What that R² actually looks like on a real subject's timeline (`trajectory_viewer.py`, best/median/worst case by LOSO mean absolute error, not cherry-picked):
+
+![CD trajectories](results/trajectories/cd_trajectories.png)
+![UC trajectories](results/trajectories/uc_trajectories.png)
+
+The pattern in the worst cases is consistent across both diagnoses: the model tracks slow drift reasonably well but lags behind sharp spikes, since it only has today's score to work from. A subject who jumps from a low score to a flare in two weeks gets a prediction still anchored near their prior, calmer state. That lag is the same finding as the R² table above, just visible instead of numeric.
 
 ## Architecture
 
@@ -162,6 +172,7 @@ The source dataset and its original analysis are [Lloyd-Price et al. 2019, *Natu
 - Low-dimensional ecological summary features (diversity, richness, dysbiosis score, trajectory deltas) were tried as an alternative to 578 raw species, on the idea that dimensionality itself was hiding real signal. It was not. The ecology-based models show the same pattern, mostly-zero fitted coefficients and no improvement over `score_regression`, which is evidence the earlier negative result is real rather than an artifact of one particular feature representation.
 - Building the dysbiosis score turned up a real QC issue: 11 of 1638 metagenomics samples had exactly 0 abundance across all 578 species. These turned out to be failed profiling runs rather than genuine zero-diversity samples, and they had been silently included in every model up to that point. This was fixed by dropping them at the source in `load_species_taxonomy`. The shift in reported numbers was small, a handful of contaminated rows in an already-large sample, but real.
 - The first LOSO run used `GridSearchCV(n_jobs=-1)` inside the outer loop, which respawns a joblib worker pool per call, 164 calls total. That is fine on Linux but effectively hung on Windows process-spawn overhead. It was fixed by switching to `n_jobs=1`.
+- The patient-trajectory viewer originally planned as a stretch goal is built (`trajectory_viewer.py`, see Validation/Results above).
 
 **Genuine design decisions, not oversights:**
 - Single-omic (metagenomics only) for all models here. Metabolomics fusion would cut the modeling set by about 70%, since only 30% of timepoints have a paired sample, so it is deferred to a future enrichment pass over that smaller subset rather than folded into the primary models.
@@ -169,7 +180,6 @@ The source dataset and its original analysis are [Lloyd-Price et al. 2019, *Natu
 - HBI and SCCAI are kept diagnosis-separate rather than pooled onto one severity scale, since they are different clinical instruments scored for different diagnoses.
 
 **Stretch goals, not started:**
-- A patient-trajectory viewer, showing predicted vs. actual activity score over a held-out subject's real timepoints.
 - Metabolomics fusion over the roughly 30% paired-sample subset.
 - A second, independent microbiome-IBD cohort for held-out validation. The SHAP-based plausibility check above was used instead, as a cheaper independent sanity check on the same cohort.
 
