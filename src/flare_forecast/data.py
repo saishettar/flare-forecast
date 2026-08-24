@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 RAW_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
@@ -72,3 +73,65 @@ def build_baseline_dataset(diagnosis: str) -> tuple[pd.DataFrame, pd.Series, pd.
     y = joined[score_col]
     groups = joined["Participant ID"]
     return X, y, groups
+
+
+def _load_scored_mgx(diagnosis: str) -> pd.DataFrame:
+    """Metagenomics samples for one diagnosis, with score + week_num, species-joined."""
+    if diagnosis not in DIAGNOSIS_SCORE_COL:
+        raise ValueError(f"diagnosis must be one of {list(DIAGNOSIS_SCORE_COL)}, got {diagnosis!r}")
+    score_col = DIAGNOSIS_SCORE_COL[diagnosis]
+
+    meta = load_metadata()
+    mgx = meta[(meta["data_type"] == "metagenomics") & (meta["diagnosis"] == diagnosis)]
+    mgx = mgx.dropna(subset=[score_col, "week_num"]).set_index("External ID")
+
+    species = load_species_taxonomy()
+    joined = mgx[[score_col, "Participant ID", "week_num"]].join(species, how="inner")
+    return joined.rename(columns={score_col: "score"})
+
+
+def build_forecast_dataset(
+    diagnosis: str, min_gap_weeks: float = 2, max_gap_weeks: float = 4
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
+    """(t, t+1) forecasting pairs: microbiome + score at t -> score at t+1.
+
+    For each subject, every same-subject pair of metagenomics timepoints
+    (t_i, t_j) with week_j - week_i in [min_gap_weeks, max_gap_weeks] is
+    one row -- not just consecutive visits, since HMP2's sampling
+    intervals are irregular (median 2 weeks, but ranging 0-19; see
+    scripts/eda_phase1.py). [2, 4] weeks was chosen because it covers
+    the bulk of naturally occurring gaps (1044/1508 = 69% of consecutive
+    HMP2 metagenomics gaps fall in [2,4]) and matches SCOPE's target
+    forecast horizon.
+
+    Returns:
+        X_t: species-level relative abundances at timepoint t (source).
+        score_t: activity score at t -- the naive "persistence" predictor
+            (does the microbiome add anything beyond just today's score?).
+        y: activity score at t+1 (target, 2-4 weeks after t).
+        groups: Participant ID, for subject-grouped/LOSO cross-validation.
+        gap: weeks between t and t+1 (diagnostic only, not a feature).
+    """
+    scored = _load_scored_mgx(diagnosis)
+    feature_cols = [c for c in scored.columns if c not in ("score", "Participant ID", "week_num")]
+
+    rows_X, rows_score_t, rows_y, rows_groups, rows_gap = [], [], [], [], []
+    for pid, g in scored.groupby("Participant ID"):
+        g = g.sort_values("week_num")
+        weeks = g["week_num"].to_numpy()
+        for i in range(len(g)):
+            for j in range(len(g)):
+                gap = weeks[j] - weeks[i]
+                if min_gap_weeks <= gap <= max_gap_weeks:
+                    rows_X.append(g.iloc[i][feature_cols].to_numpy())
+                    rows_score_t.append(g.iloc[i]["score"])
+                    rows_y.append(g.iloc[j]["score"])
+                    rows_groups.append(pid)
+                    rows_gap.append(gap)
+
+    X_t = pd.DataFrame(np.vstack(rows_X), columns=feature_cols)
+    score_t = pd.Series(rows_score_t, name="score_t")
+    y = pd.Series(rows_y, name="score_t1")
+    groups = pd.Series(rows_groups, name="Participant ID")
+    gap = pd.Series(rows_gap, name="gap_weeks")
+    return X_t, score_t, y, groups, gap
