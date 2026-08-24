@@ -1,18 +1,18 @@
-"""Phase 4 — biological plausibility check via SHAP (SCOPE.md option b).
+"""Biological plausibility check for the "combined" model, via SHAP.
 
-Phase 3 found the "combined" model (microbiome + current score) clears
-the persistence baseline, but a modest R^2 improvement on ~700 samples
-doesn't rule out the model leaning on noise. This is a plausibility
-check independent of the accuracy number: fit the same combined
-ElasticNet on all data (single grouped hyperparameter search, not LOSO
--- this is about inspecting one model's learned coefficients, not
-re-proving Phase 3's validation), then check whether the species it
-weights most heavily match taxa already implicated in IBD by prior
-literature.
+An earlier run found the "combined" model (microbiome + current score)
+clears the persistence baseline, but a modest R^2 improvement on ~700
+samples does not rule out the model leaning on noise. This is a
+plausibility check independent of the accuracy number: fit the same
+combined ElasticNet on all data (single grouped hyperparameter search,
+not LOSO, since this is about inspecting one model's learned
+coefficients, not re-proving that earlier validation), then check
+whether the species it weights most heavily match taxa already
+implicated in IBD by prior literature.
 
-Reference direction (Lloyd-Price et al. 2019, *Nature*; the HMP2 source
+Reference direction (Lloyd-Price et al. 2019, *Nature*, the HMP2 source
 paper) for what "the model found something real" would look like:
-  - Overrepresented in dysbiosis/flares: Proteobacteria bloom, esp.
+  - Overrepresented in dysbiosis/flares: Proteobacteria bloom, especially
     Escherichia coli and other Enterobacteriaceae; Ruminococcus gnavus.
   - Depleted in dysbiosis (loss of short-chain-fatty-acid/butyrate
     producers): Faecalibacterium prausnitzii, Roseburia hominis,
@@ -20,9 +20,9 @@ paper) for what "the model found something real" would look like:
     Alistipes putredinis, Dialister invisus.
 
 This is a coarse, non-exhaustive reference list for a sanity check, not
-a formal enrichment test -- absence from it doesn't mean a species is
-biologically irrelevant, and presence doesn't prove the model learned
-the *mechanism* the literature describes.
+a formal enrichment test. Absence from it does not mean a species is
+biologically irrelevant, and presence does not prove the model learned
+the mechanism the literature describes.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def species_short_name(lineage_or_name: str) -> str:
 
 
 def run(diagnosis: str, top_n: int = 20) -> None:
-    X_t, score_t, y, groups, gap = build_forecast_dataset(diagnosis)
+    X_t, score_t, y, groups, gap, _week_t = build_forecast_dataset(diagnosis)
     feature_names = list(X_t.columns)
     n_species_cols = X_t.shape[1]
 

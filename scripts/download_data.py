@@ -5,7 +5,7 @@ Globus-backed file store: clinical/sample metadata, MetaPhlAn taxonomic
 profiles, and HUMAnN pathway + EC functional profiles (bioBakery 3.0
 release), plus the metabolomics BIOM table. These are the "Merged Table"
 / "Merged Tables" links on https://ibdmdb.org/results (products_MGX and
-products_MBX pages) — verified by hand since the site has no API or
+products_MBX pages), verified by hand since the site has no API or
 manifest file.
 
 Usage:

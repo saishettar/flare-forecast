@@ -1,7 +1,7 @@
 """Load HMP2 metadata and taxonomic profiles into aligned model-ready tables.
 
 Activity scores are diagnosis-specific in this cohort (HBI is scored for
-Crohn's disease, SCCAI for ulcerative colitis — confirmed empirically:
+Crohn's disease, SCCAI for ulcerative colitis, confirmed empirically:
 of metagenomics rows with a non-null HBI, 689/693 are CD; of those with a
 non-null SCCAI, 436/452 are UC). There is no single instrument that
 applies across both diagnoses in HMP2, so callers pick one
@@ -63,7 +63,7 @@ def build_baseline_dataset(diagnosis: str) -> tuple[pd.DataFrame, pd.Series, pd.
         X: species-level relative abundances, one row per metagenomics sample.
         y: the diagnosis' activity score (hbi for CD, sccai for UC) at that sample.
         groups: Participant ID per row, for subject-grouped cross-validation
-            (HMP2 has up to 24 repeated-measures timepoints per subject —
+            (HMP2 has up to 24 repeated-measures timepoints per subject,
             an ungrouped split leaks the same patient's microbiome across
             train/test folds).
     """
@@ -116,7 +116,7 @@ def _load_scored_mgx(diagnosis: str) -> pd.DataFrame:
 
 def build_forecast_dataset(
     diagnosis: str, min_gap_weeks: float = 2, max_gap_weeks: float = 4
-) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     """(t, t+1) forecasting pairs: microbiome + score at t -> score at t+1.
 
     For each subject, every same-subject pair of metagenomics timepoints
@@ -125,8 +125,8 @@ def build_forecast_dataset(
     intervals are irregular (median 2 weeks, but ranging 0-19; see
     scripts/eda.py). [2, 4] weeks was chosen because it covers
     the bulk of naturally occurring gaps (1044/1508 = 69% of consecutive
-    HMP2 metagenomics gaps fall in [2,4]) and matches SCOPE's target
-    forecast horizon.
+    HMP2 metagenomics gaps fall in [2,4]) and matches the project's
+    target forecast horizon.
 
     Returns:
         X_t: species-level relative abundances at timepoint t (source).
@@ -135,11 +135,14 @@ def build_forecast_dataset(
         y: activity score at t+1 (target, 2-4 weeks after t).
         groups: Participant ID, for subject-grouped/LOSO cross-validation.
         gap: weeks between t and t+1 (diagnostic only, not a feature).
+        week_t: week_num of the source timepoint (diagnostic/plotting only,
+            not a feature -- lets a caller reconstruct each pair's real
+            position on a subject's timeline via week_t and week_t + gap).
     """
     scored = _load_scored_mgx(diagnosis)
     feature_cols = [c for c in scored.columns if c not in ("score", "Participant ID", "week_num")]
 
-    rows_X, rows_score_t, rows_y, rows_groups, rows_gap = [], [], [], [], []
+    rows_X, rows_score_t, rows_y, rows_groups, rows_gap, rows_week_t = [], [], [], [], [], []
     for pid, g in scored.groupby("Participant ID"):
         g = g.sort_values("week_num")
         weeks = g["week_num"].to_numpy()
@@ -152,13 +155,15 @@ def build_forecast_dataset(
                     rows_y.append(g.iloc[j]["score"])
                     rows_groups.append(pid)
                     rows_gap.append(gap)
+                    rows_week_t.append(weeks[i])
 
     X_t = pd.DataFrame(np.vstack(rows_X), columns=feature_cols)
     score_t = pd.Series(rows_score_t, name="score_t")
     y = pd.Series(rows_y, name="score_t1")
     groups = pd.Series(rows_groups, name="Participant ID")
     gap = pd.Series(rows_gap, name="gap_weeks")
-    return X_t, score_t, y, groups, gap
+    week_t = pd.Series(rows_week_t, name="week_t")
+    return X_t, score_t, y, groups, gap, week_t
 
 
 ECOLOGY_FEATURE_COLS = [

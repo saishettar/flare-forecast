@@ -1,20 +1,19 @@
-"""Phase 2 baseline: cross-sectional activity-score regression.
+"""Cross-sectional activity-score baseline (same-timepoint, not forecast).
 
 Predicts same-timepoint HBI (Crohn's) or SCCAI (UC) from species-level
 gut microbiome composition, ElasticNet with a subject-grouped nested CV:
 
-- Outer GroupKFold(5) by Participant ID gives the reported R² — this is
-  the number that matters, and it must be subject-grouped because HMP2
-  has up to 24 repeated-measures timepoints per subject; an ungrouped
-  split would let the same patient's near-identical microbiome appear
-  in both train and test.
+- Outer GroupKFold(5) by Participant ID gives the reported R², the
+  number that matters. It has to be subject-grouped because HMP2 has up
+  to 24 repeated-measures timepoints per subject; an ungrouped split
+  would let the same patient's near-identical microbiome appear in both
+  train and test.
 - Inner GroupKFold(4), also by subject, does the alpha/l1_ratio search
   (via GridSearchCV) within each outer training fold, so hyperparameter
-  selection doesn't leak test-fold subjects either.
+  selection does not leak test-fold subjects either.
 
-This is the de-risking step before Phase 3's real target (forecasting
-activity 2-4 weeks ahead) — same validation shape, no temporal element
-yet.
+This is the de-risking step before the real target, forecasting activity
+2-4 weeks ahead. Same validation shape, no temporal element yet.
 """
 
 from __future__ import annotations

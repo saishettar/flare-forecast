@@ -1,24 +1,25 @@
-"""Phase 1 EDA: feature/sample dimensions and the single- vs multi-omic call.
+"""EDA: feature/sample dimensions and the single- vs multi-omic call.
 
-SCOPE.md flags the core technical risk up front: ~132 subjects but
-thousands of taxa/pathway features (classic small-n/high-dimension), and
-asks that the single- vs multi-omic decision be resolved here, once real
-counts are in hand. This script prints those counts against the raw
-downloads in data/raw/ (run scripts/download_data.py first).
+The core technical risk up front: ~132 subjects but thousands of
+taxa/pathway features, a classic small-n, high-dimension problem. The
+single- vs multi-omic decision needs to be resolved here, once real
+counts are in hand, rather than assumed. This script prints those counts
+against the raw downloads in data/raw/ (run scripts/download_data.py
+first).
 
 Findings (2026-08-24, bioBakery 3.0 / 2018-08-20 metadata release):
     - 130 subjects with >=1 metagenomics sample, 1638 MGX samples total.
     - Feature counts dwarf sample count at every level: 932 taxa,
       22,113 pathways, 167,854 ECs vs. 130 subjects / 1638 samples.
-      -> regularization (ElasticNet/Lasso) or a curated/dimension-reduced
+      Regularization (ElasticNet/Lasso) or a curated/dimension-reduced
       feature set is mandatory, not optional, for any of these.
     - Metabolomics only has 546 samples / 106 subjects, and only 473 of
       the 1638 MGX samples (29%) have a same-timepoint paired MBX sample.
       Fusing metabolomics in from the start would cut the modeling set
       by ~70% before regularization even gets a chance to help.
     - Decision: start single-omic (metagenomics: taxonomy + pathways).
-      Revisit metabolomics fusion in Phase 4 as a secondary/enrichment
-      pass over the smaller paired subset, not the primary model.
+      Revisit metabolomics fusion later as a secondary/enrichment pass
+      over the smaller paired subset, not the primary model.
 """
 
 from __future__ import annotations
@@ -70,8 +71,8 @@ def main() -> None:
     print(f"ECs: {n_ecs} features")
 
     print(f"\nfeatures >> subjects at every level ({tax.shape[0]}-{n_ecs} features vs. "
-          f"{mgx['Participant ID'].nunique()} subjects) -> regularization/dimensionality "
-          "reduction is required, single-omic (metagenomics) is the Phase 1-3 modeling basis.")
+          f"{mgx['Participant ID'].nunique()} subjects). Regularization/dimensionality "
+          "reduction is required; single-omic (metagenomics) is the modeling basis going forward.")
 
 
 if __name__ == "__main__":

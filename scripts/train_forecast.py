@@ -1,32 +1,31 @@
-"""Phase 3 — the real headline: flare forecasting.
+"""Flare forecasting: what actually predicts activity 2-4 weeks out.
 
 Predicts activity score 2-4 weeks ahead (score_t1) from timepoint t's gut
-microbiome composition, evaluated with **leave-one-subject-out** CV (the
-validation shape named in SCOPE.md's target resume headline) so a
+microbiome composition, evaluated with leave-one-subject-out CV so a
 patient's own repeated-measures samples never appear in both train and
 test.
 
 Models per diagnosis, to isolate what the microbiome actually adds:
-  1. persistence      — y_pred = score_t (the trivial "nothing changed" guess)
-  2. score_regression — LinearRegression(score_t) -> score_t1 (a *fitted*
+  1. persistence      = y_pred = score_t (the trivial "nothing changed" guess)
+  2. score_regression = LinearRegression(score_t) -> score_t1 (a fitted
                          linear recalibration of persistence, e.g. mean
                          reversion; still no microbiome data)
-  3. microbiome        — ElasticNet on species abundance at t only
-  4. combined          — ElasticNet on species abundance + score_t
-  5. ecology           — ElasticNet on ecology.py's low-dim summary features
-                         (diversity/richness/dysbiosis-score at t, and their
+  3. microbiome        = ElasticNet on species abundance at t only
+  4. combined          = ElasticNet on species abundance + score_t
+  5. ecology           = ElasticNet on ecology.py's low-dim summary features
+                         (diversity/richness/dysbiosis score at t, and their
                          deltas from the prior visit) instead of raw species
-  6. ecology_combined  — ecology features + score_t
+  6. ecology_combined  = ecology features + score_t
 
-(2) exists because comparing (4) only against (1) is misleading: (4) can
-beat (1) purely by *learning a slope/intercept* for score_t (persistence
-forces slope=1, intercept=0), with zero contribution from any species.
-That's exactly what happened in an earlier run (see the SHAP-check
-commit) -- (4)'s species coefficients are ~all zero, so the honest
-comparison for "does microbiome add anything" is (4) vs (2), not (4) vs
-(1). (5)/(6) exist because raw species may simply be too
+(2) exists because comparing (4) only against (1) is misleading. (4) can
+beat (1) purely by learning a slope and intercept for score_t, since
+persistence forces slope=1, intercept=0, with zero contribution from any
+species. That is exactly what happened in an earlier run (see the
+SHAP-check commit): (4)'s species coefficients are almost all zero, so
+the honest comparison for whether the microbiome adds anything is (4) vs
+(2), not (4) vs (1). (5)/(6) exist because raw species may simply be too
 high-dimensional (578 features) for 51-83 training subjects to find
-signal in even when it exists -- see data.py's build_forecast_dataset_
+signal in even when it exists. See data.py's build_forecast_dataset_
 ecology for the reasoning.
 """
 
@@ -133,7 +132,7 @@ def loso_score_regression(
 
 
 def run(diagnosis: str) -> dict:
-    X_t, score_t, y, groups, gap = build_forecast_dataset(diagnosis)
+    X_t, score_t, y, groups, gap, _week_t = build_forecast_dataset(diagnosis)
     n_species_cols = X_t.shape[1]
     X_t, score_t, y, groups = X_t.to_numpy(), score_t.to_numpy(), y.to_numpy(), groups.to_numpy()
     n_subjects = len(set(groups))
