@@ -40,7 +40,7 @@ def load_species_taxonomy() -> pd.DataFrame:
     tax = pd.read_csv(TAXONOMY_PATH, sep="\t", index_col=0)
     species = tax[tax.index.str.count(r"\|") == 6]
     species = species.rename(index=lambda s: s.rsplit("|", 1)[-1])
-    samples = species.T
+    samples = species.T / 100.0  # source values are percentages (sum to 100), not proportions
     samples.index = samples.index.str.removesuffix("_profile")
     samples.index.name = "External ID"
     return samples
