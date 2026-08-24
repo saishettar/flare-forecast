@@ -22,6 +22,7 @@ RAW_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
 
 METADATA_PATH = RAW_DIR / "hmp2_metadata_2018-08-20.csv"
 TAXONOMY_PATH = RAW_DIR / "taxonomic_profiles_3.tsv.gz"
+PATHWAY_PATH = RAW_DIR / "pathabundances_3.tsv.gz"
 
 # Activity score column, by diagnosis it's actually scored for.
 DIAGNOSIS_SCORE_COL = {"CD": "hbi", "UC": "sccai"}
@@ -52,6 +53,36 @@ def load_species_taxonomy() -> pd.DataFrame:
     # biological zero-diversity samples. Left in, they're a division-by-zero trap
     # for Bray-Curtis dysbiosis scoring and a spurious "zero diversity" data point
     # for everything else. Drop them here so every downstream consumer is clean.
+    samples = samples[samples.sum(axis=1) > 0]
+    return samples
+
+
+def load_pathway_abundance() -> pd.DataFrame:
+    """HUMAnN community-level pathway abundance (copies per million), samples x features.
+
+    Like the taxonomy file, this stacks every stratification level
+    (community total, then per-contributing-species breakdowns) in one
+    file, with '|'-delimited row names for the stratified rows. Keeping
+    only the unstratified rows (no '|') gives one non-redundant feature
+    per pathway, 476 of them, after also dropping UNMAPPED/UNINTEGRATED
+    (reads that could not be assigned to any pathway at all -- not a
+    biological signal about a specific pathway).
+
+    Unlike species relative abundance, these are not proportions in
+    [0, 1] (a sample's pathways can and do overlap in which reads they
+    draw on), so they get a log1p transform downstream instead of
+    arcsin-sqrt.
+    """
+    path = pd.read_csv(PATHWAY_PATH, sep="\t", index_col=0)
+    unstratified = path[~path.index.str.contains(r"\|")]
+    unstratified = unstratified[~unstratified.index.isin(["UNMAPPED", "UNINTEGRATED"])]
+    samples = unstratified.T
+    samples.index = samples.index.str.removesuffix("_pathabundance_cpm")
+    samples.index.name = "External ID"
+
+    # Same failed-profiling-run issue as load_species_taxonomy, 14/1638 samples
+    # here rather than 11 (mostly, not entirely, the same samples -- a few
+    # profile taxonomically but fail functional profiling, or vice versa).
     samples = samples[samples.sum(axis=1) > 0]
     return samples
 
@@ -99,8 +130,14 @@ def load_nonibd_reference_species() -> pd.DataFrame:
     return ref[[]].join(species, how="inner")
 
 
-def _load_scored_mgx(diagnosis: str) -> pd.DataFrame:
-    """Metagenomics samples for one diagnosis, with score + week_num, species-joined."""
+def _load_scored_mgx(diagnosis: str, feature_loader=load_species_taxonomy) -> pd.DataFrame:
+    """Metagenomics samples for one diagnosis, with score + week_num, feature-joined.
+
+    feature_loader is any zero-arg callable returning a samples x features
+    DataFrame indexed by External ID (load_species_taxonomy or
+    load_pathway_abundance), so the same join/pairing logic below works
+    for either feature representation without duplicating it.
+    """
     if diagnosis not in DIAGNOSIS_SCORE_COL:
         raise ValueError(f"diagnosis must be one of {list(DIAGNOSIS_SCORE_COL)}, got {diagnosis!r}")
     score_col = DIAGNOSIS_SCORE_COL[diagnosis]
@@ -109,13 +146,16 @@ def _load_scored_mgx(diagnosis: str) -> pd.DataFrame:
     mgx = meta[(meta["data_type"] == "metagenomics") & (meta["diagnosis"] == diagnosis)]
     mgx = mgx.dropna(subset=[score_col, "week_num"]).set_index("External ID")
 
-    species = load_species_taxonomy()
-    joined = mgx[[score_col, "Participant ID", "week_num"]].join(species, how="inner")
+    features = feature_loader()
+    joined = mgx[[score_col, "Participant ID", "week_num"]].join(features, how="inner")
     return joined.rename(columns={score_col: "score"})
 
 
 def build_forecast_dataset(
-    diagnosis: str, min_gap_weeks: float = 2, max_gap_weeks: float = 4
+    diagnosis: str,
+    min_gap_weeks: float = 2,
+    max_gap_weeks: float = 4,
+    feature_loader=load_species_taxonomy,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     """(t, t+1) forecasting pairs: microbiome + score at t -> score at t+1.
 
@@ -128,8 +168,11 @@ def build_forecast_dataset(
     HMP2 metagenomics gaps fall in [2,4]) and matches the project's
     target forecast horizon.
 
+    feature_loader picks the feature representation: species-level
+    taxonomy by default, or load_pathway_abundance for HUMAnN pathways.
+
     Returns:
-        X_t: species-level relative abundances at timepoint t (source).
+        X_t: features at timepoint t (source).
         score_t: activity score at t -- the naive "persistence" predictor
             (does the microbiome add anything beyond just today's score?).
         y: activity score at t+1 (target, 2-4 weeks after t).
@@ -139,7 +182,7 @@ def build_forecast_dataset(
             not a feature -- lets a caller reconstruct each pair's real
             position on a subject's timeline via week_t and week_t + gap).
     """
-    scored = _load_scored_mgx(diagnosis)
+    scored = _load_scored_mgx(diagnosis, feature_loader)
     feature_cols = [c for c in scored.columns if c not in ("score", "Participant ID", "week_num")]
 
     rows_X, rows_score_t, rows_y, rows_groups, rows_gap, rows_week_t = [], [], [], [], [], []

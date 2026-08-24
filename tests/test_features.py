@@ -1,6 +1,6 @@
 import numpy as np
 
-from flare_forecast.features import ArcsinSqrtTransform, PrevalenceFilter
+from flare_forecast.features import ArcsinSqrtTransform, Log1pTransform, PrevalenceFilter
 
 
 def test_prevalence_filter_keeps_columns_at_or_above_threshold():
@@ -36,3 +36,15 @@ def test_arcsin_sqrt_clips_out_of_range_proportions():
     X = np.array([[-0.001, 1.001]])
     out = ArcsinSqrtTransform().fit_transform(X)
     np.testing.assert_allclose(out, [[0.0, np.pi / 2]])
+
+
+def test_log1p_known_values():
+    X = np.array([[0.0, np.e - 1]])
+    out = Log1pTransform().fit_transform(X)
+    np.testing.assert_allclose(out, [[0.0, 1.0]])
+
+
+def test_log1p_clips_negative_values():
+    X = np.array([[-5.0, 0.0]])
+    out = Log1pTransform().fit_transform(X)
+    np.testing.assert_allclose(out, [[0.0, 0.0]])

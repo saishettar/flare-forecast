@@ -16,6 +16,9 @@ Models per diagnosis, to isolate what the microbiome actually adds:
                          (diversity/richness/dysbiosis score at t, and their
                          deltas from the prior visit) instead of raw species
   6. ecology_combined  = ecology features + score_t
+  7. pathway           = ElasticNet on HUMAnN pathway abundance (476
+                         unstratified pathways) instead of species taxonomy
+  8. pathway_combined  = pathway features + score_t
 
 (2) exists because comparing (4) only against (1) is misleading. (4) can
 beat (1) purely by learning a slope and intercept for score_t, since
@@ -25,8 +28,11 @@ SHAP-check commit): (4)'s species coefficients are almost all zero, so
 the honest comparison for whether the microbiome adds anything is (4) vs
 (2), not (4) vs (1). (5)/(6) exist because raw species may simply be too
 high-dimensional (578 features) for 51-83 training subjects to find
-signal in even when it exists. See data.py's build_forecast_dataset_
-ecology for the reasoning.
+signal in even when it exists (see data.py's build_forecast_dataset_
+ecology). (7)/(8) exist because taxonomic identity is not the only way
+to represent the microbiome: different species can fill the same
+metabolic role, so a functional (pathway) view might carry signal a
+taxonomic one does not.
 """
 
 from __future__ import annotations
@@ -34,19 +40,33 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
 from sklearn.compose import ColumnTransformer
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, LinearRegression
 from sklearn.model_selection import GridSearchCV, GroupKFold, LeaveOneGroupOut
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+# The pathway features (476 columns, many correlated since pathways share genes)
+# trip ElasticNet's convergence check at the weak-regularization end of the grid
+# search regardless of max_iter. The fit still returns a usable solution and
+# GridSearchCV picks among all of them by held-out score, so this is noise, not
+# a correctness problem, but 50+ warnings per fold makes the real output
+# unreadable.
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from flare_forecast.data import build_forecast_dataset, build_forecast_dataset_ecology  # noqa: E402
-from flare_forecast.features import ArcsinSqrtTransform, PrevalenceFilter  # noqa: E402
+from flare_forecast.data import (  # noqa: E402
+    build_forecast_dataset,
+    build_forecast_dataset_ecology,
+    load_pathway_abundance,
+)
+from flare_forecast.features import ArcsinSqrtTransform, Log1pTransform, PrevalenceFilter  # noqa: E402
 
 PARAM_GRID = {
     "model__alpha": np.logspace(-3, 1, 9),
@@ -55,29 +75,38 @@ PARAM_GRID = {
 N_INNER_SPLITS = 4
 
 
-def make_pipeline(n_species_cols: int, n_total_cols: int) -> Pipeline:
-    """ElasticNet pipeline. species columns get prevalence-filter + arcsin-sqrt +
-    scale; any extra non-compositional column (score_t) only gets scaled --
-    arcsin-sqrt assumes a [0,1] proportion, which score_t is not."""
-    species_pipe = Pipeline([
+def make_compositional_pipeline(n_feature_cols: int, n_total_cols: int, transform) -> Pipeline:
+    """ElasticNet pipeline. Feature columns get prevalence-filter + `transform` +
+    scale; any extra non-compositional column (score_t) only gets scaled, since
+    transform (arcsin-sqrt or log1p) assumes something about the feature
+    columns' scale that score_t does not share."""
+    feature_pipe = Pipeline([
         ("prevalence", PrevalenceFilter(min_prevalence=0.1)),
-        ("arcsin_sqrt", ArcsinSqrtTransform()),
+        ("transform", transform),
         ("scale", StandardScaler()),
     ])
-    transformers = [("species", species_pipe, list(range(n_species_cols)))]
-    if n_total_cols > n_species_cols:
+    transformers = [("features", feature_pipe, list(range(n_feature_cols)))]
+    if n_total_cols > n_feature_cols:
         transformers.append(
-            ("extra", StandardScaler(), list(range(n_species_cols, n_total_cols)))
+            ("extra", StandardScaler(), list(range(n_feature_cols, n_total_cols)))
         )
     preprocess = ColumnTransformer(transformers)
-    return Pipeline([("preprocess", preprocess), ("model", ElasticNet(max_iter=10_000))])
+    return Pipeline([("preprocess", preprocess), ("model", ElasticNet(max_iter=50_000))])
+
+
+def make_pipeline(n_species_cols: int, n_total_cols: int) -> Pipeline:
+    return make_compositional_pipeline(n_species_cols, n_total_cols, ArcsinSqrtTransform())
+
+
+def make_pathway_pipeline(n_pathway_cols: int, n_total_cols: int) -> Pipeline:
+    return make_compositional_pipeline(n_pathway_cols, n_total_cols, Log1pTransform())
 
 
 def make_ecology_pipeline() -> Pipeline:
     """Ecology summary features are already plain numeric (diversity index,
     a count, a distance, deltas thereof) -- no compositional prevalence
     filter or arcsin-sqrt transform needed, just scale + ElasticNet."""
-    return Pipeline([("scale", StandardScaler()), ("model", ElasticNet(max_iter=10_000))])
+    return Pipeline([("scale", StandardScaler()), ("model", ElasticNet(max_iter=50_000))])
 
 
 def r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -172,6 +201,26 @@ def run(diagnosis: str) -> dict:
     X_eco_combined = np.hstack([X_eco, score_t_eco.reshape(-1, 1)])
     y_true, y_pred = loso_generic(X_eco_combined, y_eco, groups_eco, make_ecology_pipeline)
     record("ecology_combined", y_true, y_pred)
+
+    # 7/8. HUMAnN pathway abundance (476 unstratified pathways), alone and + score_t
+    X_pw, score_t_pw, y_pw, groups_pw, _, _ = build_forecast_dataset(
+        diagnosis, feature_loader=load_pathway_abundance
+    )
+    n_pathway_cols = X_pw.shape[1]
+    X_pw, score_t_pw = X_pw.to_numpy(), score_t_pw.to_numpy()
+    y_pw, groups_pw = y_pw.to_numpy(), groups_pw.to_numpy()
+
+    y_true, y_pred = loso_generic(
+        X_pw, y_pw, groups_pw, lambda: make_pathway_pipeline(n_pathway_cols, X_pw.shape[1])
+    )
+    record("pathway", y_true, y_pred)
+
+    X_pw_combined = np.hstack([X_pw, score_t_pw.reshape(-1, 1)])
+    y_true, y_pred = loso_generic(
+        X_pw_combined, y_pw, groups_pw,
+        lambda: make_pathway_pipeline(n_pathway_cols, X_pw_combined.shape[1]),
+    )
+    record("pathway_combined", y_true, y_pred)
 
     print()
     return results
