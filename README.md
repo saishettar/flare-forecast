@@ -4,6 +4,7 @@ Forecasts near-term IBD disease activity from longitudinal gut microbiome compos
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12-blue.svg)
+![tests](https://github.com/saishettar/flare-forecast/actions/workflows/tests.yml/badge.svg)
 
 ---
 
