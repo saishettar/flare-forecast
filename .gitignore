@@ -7,7 +7,7 @@ venv/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Data (large, fetched via scripts/download_data.py — not committed)
+# Data (large, fetched via scripts/download_data.py, not committed)
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep

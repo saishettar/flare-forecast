@@ -29,7 +29,8 @@ Two problems that a naive version of this analysis gets wrong, and that this pro
 
 ## Tech Stack
 
-**Data / modeling:** Python 3.12, pandas, NumPy, SciPy, scikit-learn (`ElasticNet`, `GridSearchCV`, `GroupKFold`/`LeaveOneGroupOut`), SHAP
+**Data / modeling:** Python 3.12, pandas, NumPy, SciPy, scikit-learn (`ElasticNet`, `GridSearchCV`, `GroupKFold`/`LeaveOneGroupOut`), SHAP, matplotlib
+**Testing:** pytest, for `features.py` and `ecology.py`
 **Data acquisition:** `requests`, hand-verified Globus-backed download URLs
 **Storage:** flat files. Gzipped TSV/CSV in `data/raw/` (gitignored, about 281MB, fetched on demand), JSON results in `results/`
 **Not yet built:** a frontend or deployment layer (see Roadmap)
@@ -80,6 +81,12 @@ python scripts/train_forecast.py
 
 Results land in `results/forecast.json`. See Validation/Results below for the actual numbers.
 
+The transform and feature-engineering logic (`features.py`, `ecology.py`) has unit tests that do not need the downloaded data:
+
+```bash
+pytest
+```
+
 ## Project Structure
 
 ```
@@ -101,6 +108,7 @@ flare-forecast/
 ├── data/
 │   ├── raw/                    # Downloaded HMP2 source tables (gitignored, ~281MB)
 │   └── processed/              # Reserved for derived artifacts (unused so far)
+├── tests/                       # Unit tests for features.py and ecology.py, no data download needed
 └── requirements.txt
 ```
 
