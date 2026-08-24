@@ -6,14 +6,20 @@ validation shape named in SCOPE.md's target resume headline) so a
 patient's own repeated-measures samples never appear in both train and
 test.
 
-Three models per diagnosis, to isolate what the microbiome actually adds:
-  1. persistence  — y_pred = score_t (the trivial "nothing changed" guess)
-  2. microbiome   — ElasticNet on species abundance at t only
-  3. combined     — ElasticNet on species abundance + score_t
+Four models per diagnosis, to isolate what the microbiome actually adds:
+  1. persistence      — y_pred = score_t (the trivial "nothing changed" guess)
+  2. score_regression — LinearRegression(score_t) -> score_t1 (a *fitted*
+                         linear recalibration of persistence, e.g. mean
+                         reversion; still no microbiome data)
+  3. microbiome        — ElasticNet on species abundance at t only
+  4. combined          — ElasticNet on species abundance + score_t
 
-If (3) doesn't clearly beat (1), the microbiome isn't adding forecasting
-power beyond "ask how the patient is doing today" — worth knowing, not
-worth hiding.
+(2) exists because comparing (4) only against (1) is misleading: (4) can
+beat (1) purely by *learning a slope/intercept* for score_t (persistence
+forces slope=1, intercept=0), with zero contribution from any species.
+That's exactly what happened here (see Phase 4 SHAP check) -- (4)'s
+species coefficients are ~all zero, so the honest comparison for "does
+microbiome add anything" is (4) vs (2), not (4) vs (1).
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import ElasticNet
+from sklearn.linear_model import ElasticNet, LinearRegression
 from sklearn.model_selection import GridSearchCV, GroupKFold, LeaveOneGroupOut
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -91,6 +97,20 @@ def loso_elasticnet(
     return np.array(y_true_all), np.array(y_pred_all)
 
 
+def loso_score_regression(
+    score_t: np.ndarray, y: np.ndarray, groups: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """LOSO predictions for a plain LinearRegression(score_t) -> score_t1."""
+    logo = LeaveOneGroupOut()
+    y_true_all, y_pred_all = [], []
+    for train_idx, test_idx in logo.split(score_t.reshape(-1, 1), y, groups):
+        model = LinearRegression()
+        model.fit(score_t[train_idx].reshape(-1, 1), y[train_idx])
+        y_pred_all.extend(model.predict(score_t[test_idx].reshape(-1, 1)))
+        y_true_all.extend(y[test_idx])
+    return np.array(y_true_all), np.array(y_pred_all)
+
+
 def run(diagnosis: str) -> dict:
     X_t, score_t, y, groups, gap = build_forecast_dataset(diagnosis)
     n_species_cols = X_t.shape[1]
@@ -108,11 +128,15 @@ def run(diagnosis: str) -> dict:
     # 1. persistence: y_pred = score_t, no fitting needed.
     record("persistence", y, score_t)
 
-    # 2. microbiome only
+    # 2. fitted linear recalibration of score_t alone (no microbiome)
+    y_true, y_pred = loso_score_regression(score_t, y, groups)
+    record("score_regression", y_true, y_pred)
+
+    # 3. microbiome only
     y_true, y_pred = loso_elasticnet(X_t, y, groups, n_species_cols)
     record("microbiome", y_true, y_pred)
 
-    # 3. microbiome + score_t
+    # 4. microbiome + score_t
     X_combined = np.hstack([X_t, score_t.reshape(-1, 1)])
     y_true, y_pred = loso_elasticnet(X_combined, y, groups, n_species_cols)
     record("combined", y_true, y_pred)
