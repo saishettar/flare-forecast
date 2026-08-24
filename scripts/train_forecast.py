@@ -6,20 +6,28 @@ validation shape named in SCOPE.md's target resume headline) so a
 patient's own repeated-measures samples never appear in both train and
 test.
 
-Four models per diagnosis, to isolate what the microbiome actually adds:
+Models per diagnosis, to isolate what the microbiome actually adds:
   1. persistence      — y_pred = score_t (the trivial "nothing changed" guess)
   2. score_regression — LinearRegression(score_t) -> score_t1 (a *fitted*
                          linear recalibration of persistence, e.g. mean
                          reversion; still no microbiome data)
   3. microbiome        — ElasticNet on species abundance at t only
   4. combined          — ElasticNet on species abundance + score_t
+  5. ecology           — ElasticNet on ecology.py's low-dim summary features
+                         (diversity/richness/dysbiosis-score at t, and their
+                         deltas from the prior visit) instead of raw species
+  6. ecology_combined  — ecology features + score_t
 
 (2) exists because comparing (4) only against (1) is misleading: (4) can
 beat (1) purely by *learning a slope/intercept* for score_t (persistence
 forces slope=1, intercept=0), with zero contribution from any species.
-That's exactly what happened here (see Phase 4 SHAP check) -- (4)'s
-species coefficients are ~all zero, so the honest comparison for "does
-microbiome add anything" is (4) vs (2), not (4) vs (1).
+That's exactly what happened in an earlier run (see the SHAP-check
+commit) -- (4)'s species coefficients are ~all zero, so the honest
+comparison for "does microbiome add anything" is (4) vs (2), not (4) vs
+(1). (5)/(6) exist because raw species may simply be too
+high-dimensional (578 features) for 51-83 training subjects to find
+signal in even when it exists -- see data.py's build_forecast_dataset_
+ecology for the reasoning.
 """
 
 from __future__ import annotations
@@ -38,7 +46,7 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from flare_forecast.data import build_forecast_dataset  # noqa: E402
+from flare_forecast.data import build_forecast_dataset, build_forecast_dataset_ecology  # noqa: E402
 from flare_forecast.features import ArcsinSqrtTransform, PrevalenceFilter  # noqa: E402
 
 PARAM_GRID = {
@@ -66,14 +74,21 @@ def make_pipeline(n_species_cols: int, n_total_cols: int) -> Pipeline:
     return Pipeline([("preprocess", preprocess), ("model", ElasticNet(max_iter=10_000))])
 
 
+def make_ecology_pipeline() -> Pipeline:
+    """Ecology summary features are already plain numeric (diversity index,
+    a count, a distance, deltas thereof) -- no compositional prevalence
+    filter or arcsin-sqrt transform needed, just scale + ElasticNet."""
+    return Pipeline([("scale", StandardScaler()), ("model", ElasticNet(max_iter=10_000))])
+
+
 def r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - y_true.mean()) ** 2)
     return 1 - ss_res / ss_tot
 
 
-def loso_elasticnet(
-    X: np.ndarray, y: np.ndarray, groups: np.ndarray, n_species_cols: int
+def loso_generic(
+    X: np.ndarray, y: np.ndarray, groups: np.ndarray, pipeline_factory
 ) -> tuple[np.ndarray, np.ndarray]:
     """LOSO predictions for an ElasticNet pipeline, alpha/l1_ratio tuned per fold."""
     logo = LeaveOneGroupOut()
@@ -85,7 +100,7 @@ def loso_elasticnet(
 
         n_inner = min(N_INNER_SPLITS, len(set(groups_train)))
         search = GridSearchCV(
-            make_pipeline(n_species_cols, X.shape[1]),
+            pipeline_factory(),
             PARAM_GRID,
             cv=GroupKFold(n_splits=n_inner),
             scoring="r2",
@@ -95,6 +110,12 @@ def loso_elasticnet(
         y_pred_all.extend(search.predict(X_test))
         y_true_all.extend(y_test)
     return np.array(y_true_all), np.array(y_pred_all)
+
+
+def loso_elasticnet(
+    X: np.ndarray, y: np.ndarray, groups: np.ndarray, n_species_cols: int
+) -> tuple[np.ndarray, np.ndarray]:
+    return loso_generic(X, y, groups, lambda: make_pipeline(n_species_cols, X.shape[1]))
 
 
 def loso_score_regression(
@@ -140,6 +161,18 @@ def run(diagnosis: str) -> dict:
     X_combined = np.hstack([X_t, score_t.reshape(-1, 1)])
     y_true, y_pred = loso_elasticnet(X_combined, y, groups, n_species_cols)
     record("combined", y_true, y_pred)
+
+    # 5/6. low-dimensional ecology summary features, alone and + score_t
+    X_eco, score_t_eco, y_eco, groups_eco, _ = build_forecast_dataset_ecology(diagnosis)
+    X_eco, score_t_eco = X_eco.to_numpy(), score_t_eco.to_numpy()
+    y_eco, groups_eco = y_eco.to_numpy(), groups_eco.to_numpy()
+
+    y_true, y_pred = loso_generic(X_eco, y_eco, groups_eco, make_ecology_pipeline)
+    record("ecology", y_true, y_pred)
+
+    X_eco_combined = np.hstack([X_eco, score_t_eco.reshape(-1, 1)])
+    y_true, y_pred = loso_generic(X_eco_combined, y_eco, groups_eco, make_ecology_pipeline)
+    record("ecology_combined", y_true, y_pred)
 
     print()
     return results

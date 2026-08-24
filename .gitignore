@@ -19,3 +19,6 @@ data/processed/*
 
 # Env
 .env
+
+# Local project-direction doc, not for the public repo
+SCOPE.md

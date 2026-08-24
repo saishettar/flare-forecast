@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from flare_forecast.ecology import dysbiosis_score, shannon_diversity, species_richness
+
 RAW_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
 
 METADATA_PATH = RAW_DIR / "hmp2_metadata_2018-08-20.csv"
@@ -44,6 +46,13 @@ def load_species_taxonomy() -> pd.DataFrame:
     samples = species.T / 100.0  # source values are percentages (sum to 100), not proportions
     samples.index = samples.index.str.removesuffix("_profile")
     samples.index.name = "External ID"
+
+    # 11/1638 samples have exactly 0 abundance across all 578 species -- failed
+    # taxonomic profiling runs that still got a row in the merged table, not real
+    # biological zero-diversity samples. Left in, they're a division-by-zero trap
+    # for Bray-Curtis dysbiosis scoring and a spurious "zero diversity" data point
+    # for everything else. Drop them here so every downstream consumer is clean.
+    samples = samples[samples.sum(axis=1) > 0]
     return samples
 
 
@@ -73,6 +82,21 @@ def build_baseline_dataset(diagnosis: str) -> tuple[pd.DataFrame, pd.Series, pd.
     y = joined[score_col]
     groups = joined["Participant ID"]
     return X, y, groups
+
+
+def load_nonibd_reference_species() -> pd.DataFrame:
+    """Species-level relative abundance for the non-IBD reference cohort.
+
+    Used as the "healthy" comparison set for dysbiosis_score -- 429
+    metagenomics samples from 27 non-IBD subjects, disjoint from the
+    CD/UC subjects being modeled, so using this as a fixed reference in
+    any CD/UC subject's LOSO fold introduces no leakage.
+    """
+    meta = load_metadata()
+    ref = meta[(meta["data_type"] == "metagenomics") & (meta["diagnosis"] == "nonIBD")]
+    ref = ref.set_index("External ID")
+    species = load_species_taxonomy()
+    return ref[[]].join(species, how="inner")
 
 
 def _load_scored_mgx(diagnosis: str) -> pd.DataFrame:
@@ -135,3 +159,72 @@ def build_forecast_dataset(
     groups = pd.Series(rows_groups, name="Participant ID")
     gap = pd.Series(rows_gap, name="gap_weeks")
     return X_t, score_t, y, groups, gap
+
+
+ECOLOGY_FEATURE_COLS = [
+    "shannon_t", "richness_t", "dysbiosis_t",
+    "delta_shannon", "delta_richness", "delta_dysbiosis", "gap_to_prev", "has_prior",
+]
+
+
+def build_forecast_dataset_ecology(
+    diagnosis: str, min_gap_weeks: float = 2, max_gap_weeks: float = 4
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
+    """(t, t+1) forecasting pairs, but with low-dimensional ecological summary
+    features instead of raw 578-species abundance -- see ecology.py for why.
+
+    Adds trajectory features (delta_* / gap_to_prev / has_prior) computed
+    against each subject's immediately preceding metagenomics visit
+    (regardless of that visit's gap to t; 91-92% of CD/UC timepoints have
+    one). When no prior visit exists, deltas are 0 and has_prior=0 flags it
+    rather than silently treating "no data" as "no change".
+
+    Returns: X_ecology, score_t, y, groups, gap -- same shapes/meaning as
+    build_forecast_dataset, X_ecology has columns ECOLOGY_FEATURE_COLS.
+    """
+    scored = _load_scored_mgx(diagnosis)
+    species_cols = [c for c in scored.columns if c not in ("score", "Participant ID", "week_num")]
+    species_matrix = scored[species_cols].to_numpy()
+
+    reference = load_nonibd_reference_species()[species_cols].to_numpy()
+    scored = scored.assign(
+        shannon=shannon_diversity(species_matrix),
+        richness=species_richness(species_matrix),
+        dysbiosis=dysbiosis_score(species_matrix, reference),
+    )
+
+    rows_X, rows_score_t, rows_y, rows_groups, rows_gap = [], [], [], [], []
+    for pid, g in scored.groupby("Participant ID"):
+        g = g.sort_values("week_num").reset_index(drop=True)
+        weeks = g["week_num"].to_numpy()
+        for i in range(len(g)):
+            for j in range(len(g)):
+                gap = weeks[j] - weeks[i]
+                if not (min_gap_weeks <= gap <= max_gap_weeks):
+                    continue
+                if i > 0:
+                    prev = g.iloc[i - 1]
+                    delta_shannon = g.iloc[i]["shannon"] - prev["shannon"]
+                    delta_richness = g.iloc[i]["richness"] - prev["richness"]
+                    delta_dysbiosis = g.iloc[i]["dysbiosis"] - prev["dysbiosis"]
+                    gap_to_prev = weeks[i] - prev["week_num"]
+                    has_prior = 1
+                else:
+                    delta_shannon = delta_richness = delta_dysbiosis = 0.0
+                    gap_to_prev = 0.0
+                    has_prior = 0
+                rows_X.append([
+                    g.iloc[i]["shannon"], g.iloc[i]["richness"], g.iloc[i]["dysbiosis"],
+                    delta_shannon, delta_richness, delta_dysbiosis, gap_to_prev, has_prior,
+                ])
+                rows_score_t.append(g.iloc[i]["score"])
+                rows_y.append(g.iloc[j]["score"])
+                rows_groups.append(pid)
+                rows_gap.append(gap)
+
+    X = pd.DataFrame(rows_X, columns=ECOLOGY_FEATURE_COLS)
+    score_t = pd.Series(rows_score_t, name="score_t")
+    y = pd.Series(rows_y, name="score_t1")
+    groups = pd.Series(rows_groups, name="Participant ID")
+    gap = pd.Series(rows_gap, name="gap_weeks")
+    return X, score_t, y, groups, gap
