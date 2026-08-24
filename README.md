@@ -105,7 +105,18 @@ flare-forecast/
 
 **Same-timepoint baseline** (`train_baseline.py`, subject-grouped nested CV, `GroupKFold(5)`/`GroupKFold(4)`): cross-sectional microbiome composition alone is a weak predictor of same-day clinical activity score — CD mean R² ≈ -0.09, UC mean R² ≈ -0.06, both consistent with 0 or worse within one standard deviation. Reported as-is rather than tuned until it looked better; this is a known-hard task in the field, and it de-risked the modeling approach before adding the temporal element.
 
-**Forecasting** (`train_forecast.py`, leave-one-subject-out CV, ~714 CD / ~474 UC (t, t+1) pairs 2-4 weeks apart): six predictors compared per diagnosis — naive persistence, a fitted score-only regression, ElasticNet on raw species, species + score combined, and both again on `ecology.py`'s low-dimensional summary features. The headline finding so far: an earlier run showed a "combined" model beating naive persistence, which looked like real microbiome signal — a SHAP audit (`shap_plausibility.py`) caught that it wasn't, since the fitted model's species coefficients were nearly all zero (0/123 for CD, 2/121 for UC). Full corrected numbers for all six models, across both diagnoses, are being finalized now (a QC bug — 11/1638 samples with zero abundance across all 578 species from failed profiling runs — was found and fixed after the SHAP audit, and everything is being re-run against the corrected data) and will be updated here once that run completes.
+**Forecasting** (`train_forecast.py`, leave-one-subject-out CV, 714 CD / 474 UC (t, t+1) pairs 2-4 weeks apart):
+
+| model | CD R² | UC R² |
+|---|---|---|
+| persistence (y = score_t) | 0.193 | 0.256 |
+| score_regression (fitted, no microbiome) | **0.328** | **0.385** |
+| microbiome only (578 species) | -0.036 | -0.144 |
+| combined (species + score_t) | 0.299 | 0.327 |
+| ecology only (diversity/richness/dysbiosis) | -0.045 | -0.111 |
+| ecology_combined (ecology + score_t) | 0.322 | 0.346 |
+
+The honest headline: **neither raw species composition nor derived ecological state (diversity, richness, a Bray-Curtis dysbiosis score, and their deltas from the prior visit) improves 2-4-week activity forecasts beyond a plain fitted regression on today's score alone**, in this cohort, under leave-one-subject-out validation. Both microbiome representations underperform persistence outright on their own, and both "combined" variants land at or slightly below `score_regression` — never clearly above it. This wasn't the first framing tried: an earlier run reported "combined beats naive persistence" (0.300 vs. 0.194), which looked like real microbiome signal until a SHAP audit (`shap_plausibility.py`) showed the fitted model's species coefficients were nearly all zero (0/123 for CD, 2/121 for UC) — the gain was entirely a *learned slope/intercept* on score_t that naive persistence (which forces slope=1) doesn't get credit for. `score_regression` was added specifically to make that comparison fair, and the ecology feature set was built afterward on the hypothesis that 578 raw species might simply be too high-dimensional for 51-83 subjects to find signal in even if it exists — checking its fitted coefficients directly confirms the same pattern: mostly zero, small weight on 1-3 ecology features, dominant weight on score_t (CD: score_t coefficient 1.45 vs. dysbiosis_t -0.08 and everything else exactly 0; UC: score_t 1.20 vs. three small nonzero ecology terms).
 
 *(Real caveats that apply regardless of the exact final numbers: 51-83 training subjects per diagnosis means every LOSO fold is a substantial share of the data, so reported R² has real variance; HBI/SCCAI are noisy self-report clinical instruments, not lab measurements, which caps how predictable they can be from any input; and the source paper for this cohort never reports a forecasting R² to benchmark against, since it's a cross-sectional analysis — there's no strong external number saying what "good" looks like here.)*
 
@@ -144,6 +155,8 @@ The source dataset and its original analysis are [Lloyd-Price et al. 2019, *Natu
 **Gaps closed during development:**
 - The single- vs multi-omic decision was resolved with real feature/sample counts in `eda.py` rather than assumed at the start.
 - An early "combined model beats persistence" result looked like a real finding; a SHAP audit caught that the model's species coefficients were nearly all zero, so a fitted score-only baseline was added to make the comparison honest.
+- Tried low-dimensional ecological summary features (diversity, richness, dysbiosis score, trajectory deltas) as an alternative to 578 raw species, on the hypothesis that dimensionality itself was hiding real signal. It wasn't: the ecology-based models show the same pattern (mostly-zero fitted coefficients, no improvement over `score_regression`), which is evidence the earlier negative result is real rather than an artifact of one particular feature representation.
+- Building the dysbiosis score surfaced a real QC issue: 11/1638 metagenomics samples had exactly 0 abundance across all 578 species (failed profiling runs, not genuine zero-diversity samples) and were silently included in every model up to that point. Fixed by dropping them at the source in `load_species_taxonomy`; the shift in reported numbers was small (a handful of contaminated rows in an already-large sample) but real.
 - The first LOSO run used `GridSearchCV(n_jobs=-1)` inside the outer loop, which respawns a joblib worker pool per call (164 calls total) — fine on Linux, effectively hung on Windows process-spawn overhead. Fixed by switching to `n_jobs=1`.
 
 **Genuine design decisions (not oversights):**
