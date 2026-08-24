@@ -23,6 +23,7 @@ RAW_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
 METADATA_PATH = RAW_DIR / "hmp2_metadata_2018-08-20.csv"
 TAXONOMY_PATH = RAW_DIR / "taxonomic_profiles_3.tsv.gz"
 PATHWAY_PATH = RAW_DIR / "pathabundances_3.tsv.gz"
+METABOLOMICS_PATH = RAW_DIR / "HMP2_metabolomics_w_metadata.biom.gz"
 
 # Activity score column, by diagnosis it's actually scored for.
 DIAGNOSIS_SCORE_COL = {"CD": "hbi", "UC": "sccai"}
@@ -84,6 +85,37 @@ def load_pathway_abundance() -> pd.DataFrame:
     # here rather than 11 (mostly, not entirely, the same samples -- a few
     # profile taxonomically but fail functional profiling, or vice versa).
     samples = samples[samples.sum(axis=1) > 0]
+    return samples
+
+
+def load_named_metabolites() -> pd.DataFrame:
+    """Named metabolite intensities, samples x features.
+
+    The raw BIOM table has 81,867 features x 546 samples, but only 592 of
+    those features carry an actual compound name (a 'Metabolite' entry in
+    the observation metadata) rather than being an unannotated m/z-
+    retention-time peak. An unnamed peak is not something a model result
+    can be interpreted against, and 81,867 features against ~100 subjects
+    is a hopeless n/p ratio regardless, so this keeps only the named 592
+    (45 of which are the same compound measured by more than one
+    chromatography method, e.g. C18-neg vs HILIC-pos -- kept as separate
+    features rather than merged, since they are genuinely different
+    measurements).
+
+    The BIOM library is only imported here, not at module load time, so
+    that scripts which never touch metabolomics do not pay its import
+    cost or require it installed.
+    """
+    import biom
+
+    table = biom.load_table(str(METABOLOMICS_PATH))
+    obs_ids = table.ids("observation")
+    obs_md = table.metadata(axis="observation")
+    named_ids = [oid for oid, md in zip(obs_ids, obs_md) if md.get("Metabolite", "").strip()]
+
+    named = table.filter(named_ids, axis="observation", inplace=False)
+    samples = named.to_dataframe(dense=True).T
+    samples.index.name = "External ID"
     return samples
 
 
@@ -276,3 +308,59 @@ def build_forecast_dataset_ecology(
     groups = pd.Series(rows_groups, name="Participant ID")
     gap = pd.Series(rows_gap, name="gap_weeks")
     return X, score_t, y, groups, gap
+
+
+def build_forecast_dataset_metabolomics(
+    diagnosis: str, min_gap_weeks: float = 2, max_gap_weeks: float = 4
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+    """(t, t+1) forecasting pairs, restricted to source timepoints with a
+    same-week metabolomics sample -- the ~30% paired subset eda.py found.
+
+    This is the "secondary enrichment pass" the project's scope always
+    deferred metabolomics to, rather than the primary model: fusing it in
+    from the start would have cut every model's training set by ~70%
+    before any modeling even started. Here that cost is paid deliberately,
+    on a model that only has to compete against a same-subset persistence
+    baseline, not the full-data one.
+
+    Returns: X_mbx (592 named metabolite features), score_t, y, groups,
+    gap, week_t -- same shapes/meaning as build_forecast_dataset.
+    """
+    scored = _load_scored_mgx(diagnosis)  # only score/Participant ID/week_num columns are used here
+    meta = load_metadata()
+    mbx_meta = meta[(meta["data_type"] == "metabolomics") & (meta["diagnosis"] == diagnosis)]
+    mbx_meta = mbx_meta.dropna(subset=["week_num", "External ID"])
+
+    metabolites = load_named_metabolites()
+    mbx_extid_by_key: dict[tuple, str] = {}
+    for pid, week, ext_id in zip(mbx_meta["Participant ID"], mbx_meta["week_num"], mbx_meta["External ID"]):
+        if ext_id in metabolites.index:
+            mbx_extid_by_key.setdefault((pid, week), ext_id)
+
+    feature_cols = list(metabolites.columns)
+    rows_X, rows_score_t, rows_y, rows_groups, rows_gap, rows_week_t = [], [], [], [], [], []
+    for pid, g in scored.groupby("Participant ID"):
+        g = g.sort_values("week_num")
+        weeks = g["week_num"].to_numpy()
+        for i in range(len(g)):
+            ext_id = mbx_extid_by_key.get((pid, weeks[i]))
+            if ext_id is None:
+                continue  # source timepoint has no paired metabolomics sample
+            mbx_features = metabolites.loc[ext_id, feature_cols].to_numpy()
+            for j in range(len(g)):
+                gap = weeks[j] - weeks[i]
+                if min_gap_weeks <= gap <= max_gap_weeks:
+                    rows_X.append(mbx_features)
+                    rows_score_t.append(g.iloc[i]["score"])
+                    rows_y.append(g.iloc[j]["score"])
+                    rows_groups.append(pid)
+                    rows_gap.append(gap)
+                    rows_week_t.append(weeks[i])
+
+    X = pd.DataFrame(np.vstack(rows_X), columns=feature_cols)
+    score_t = pd.Series(rows_score_t, name="score_t")
+    y = pd.Series(rows_y, name="score_t1")
+    groups = pd.Series(rows_groups, name="Participant ID")
+    gap = pd.Series(rows_gap, name="gap_weeks")
+    week_t = pd.Series(rows_week_t, name="week_t")
+    return X, score_t, y, groups, gap, week_t

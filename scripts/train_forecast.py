@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from flare_forecast.data import (  # noqa: E402
     build_forecast_dataset,
     build_forecast_dataset_ecology,
+    build_forecast_dataset_metabolomics,
     load_pathway_abundance,
 )
 from flare_forecast.features import ArcsinSqrtTransform, Log1pTransform, PrevalenceFilter  # noqa: E402
@@ -100,6 +101,12 @@ def make_pipeline(n_species_cols: int, n_total_cols: int) -> Pipeline:
 
 def make_pathway_pipeline(n_pathway_cols: int, n_total_cols: int) -> Pipeline:
     return make_compositional_pipeline(n_pathway_cols, n_total_cols, Log1pTransform())
+
+
+def make_metabolomics_pipeline(n_metabolite_cols: int, n_total_cols: int) -> Pipeline:
+    # Metabolite intensities are also skewed and non-negative but not a bounded
+    # proportion, same reasoning as make_pathway_pipeline.
+    return make_compositional_pipeline(n_metabolite_cols, n_total_cols, Log1pTransform())
 
 
 def make_ecology_pipeline() -> Pipeline:
@@ -226,6 +233,49 @@ def run(diagnosis: str) -> dict:
     return results
 
 
+def run_metabolomics(diagnosis: str) -> dict:
+    """Metabolomics as a secondary enrichment pass over the ~30% paired
+    subset, not folded into run()'s main comparison. persistence and
+    score_regression are recomputed on this same smaller subset rather
+    than reused from run()'s full-data numbers, since comparing a
+    metabolomics model against a baseline fit on a different, larger set
+    of subjects would not be a fair comparison."""
+    X_mbx, score_t, y, groups, gap, _week_t = build_forecast_dataset_metabolomics(diagnosis)
+    n_metabolite_cols = X_mbx.shape[1]
+    X_mbx, score_t = X_mbx.to_numpy(), score_t.to_numpy()
+    y, groups = y.to_numpy(), groups.to_numpy()
+    n_subjects = len(set(groups))
+
+    print(f"=== {diagnosis} metabolomics subset (n={len(y)} pairs, {n_subjects} subjects) ===")
+    results = {"diagnosis": diagnosis, "n_pairs": len(y), "n_subjects": n_subjects, "models": {}}
+
+    def record(name: str, y_true: np.ndarray, y_pred: np.ndarray) -> None:
+        score_r2, score_mae = r2(y_true, y_pred), float(np.mean(np.abs(y_true - y_pred)))
+        results["models"][name] = {"r2": score_r2, "mae": score_mae}
+        print(f"  {name:<20}: R2={score_r2:.3f}  MAE={score_mae:.3f}")
+
+    record("persistence (subset)", y, score_t)
+
+    y_true, y_pred = loso_score_regression(score_t, y, groups)
+    record("score_regression (subset)", y_true, y_pred)
+
+    y_true, y_pred = loso_generic(
+        X_mbx, y, groups,
+        lambda: make_metabolomics_pipeline(n_metabolite_cols, X_mbx.shape[1]),
+    )
+    record("metabolomics", y_true, y_pred)
+
+    X_mbx_combined = np.hstack([X_mbx, score_t.reshape(-1, 1)])
+    y_true, y_pred = loso_generic(
+        X_mbx_combined, y, groups,
+        lambda: make_metabolomics_pipeline(n_metabolite_cols, X_mbx_combined.shape[1]),
+    )
+    record("metabolomics_combined", y_true, y_pred)
+
+    print()
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -233,6 +283,12 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent / "results" / "forecast.json",
         help="Where to write per-diagnosis LOSO results as JSON (set to '' to skip).",
+    )
+    parser.add_argument(
+        "--metabolomics",
+        action="store_true",
+        help="Also run the metabolomics enrichment pass (slower, smaller paired subset, "
+             "written to results/forecast_metabolomics.json).",
     )
     args = parser.parse_args()
 
@@ -242,6 +298,12 @@ def main() -> None:
         args.save_json.parent.mkdir(parents=True, exist_ok=True)
         args.save_json.write_text(json.dumps(all_results, indent=2))
         print(f"wrote {args.save_json}")
+
+    if args.metabolomics:
+        mbx_results = [run_metabolomics(diagnosis) for diagnosis in ("CD", "UC")]
+        mbx_path = Path(__file__).resolve().parent.parent / "results" / "forecast_metabolomics.json"
+        mbx_path.write_text(json.dumps(mbx_results, indent=2))
+        print(f"wrote {mbx_path}")
 
 
 if __name__ == "__main__":
