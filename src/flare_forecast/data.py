@@ -99,7 +99,7 @@ def build_forecast_dataset(
     (t_i, t_j) with week_j - week_i in [min_gap_weeks, max_gap_weeks] is
     one row -- not just consecutive visits, since HMP2's sampling
     intervals are irregular (median 2 weeks, but ranging 0-19; see
-    scripts/eda_phase1.py). [2, 4] weeks was chosen because it covers
+    scripts/eda.py). [2, 4] weeks was chosen because it covers
     the bulk of naturally occurring gaps (1044/1508 = 69% of consecutive
     HMP2 metagenomics gaps fall in [2,4]) and matches SCOPE's target
     forecast horizon.

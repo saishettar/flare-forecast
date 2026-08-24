@@ -150,7 +150,7 @@ def main() -> None:
     parser.add_argument(
         "--save-json",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "results" / "phase3_forecast.json",
+        default=Path(__file__).resolve().parent.parent / "results" / "forecast.json",
         help="Where to write per-diagnosis LOSO results as JSON (set to '' to skip).",
     )
     args = parser.parse_args()
