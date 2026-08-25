@@ -44,6 +44,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+from joblib import Parallel, delayed
 from sklearn.compose import ColumnTransformer
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, LinearRegression
@@ -122,29 +123,47 @@ def r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return 1 - ss_res / ss_tot
 
 
+def _fit_one_fold(train_idx, test_idx, X, y, groups, pipeline_factory):
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+    groups_train = groups[train_idx]
+
+    n_inner = min(N_INNER_SPLITS, len(set(groups_train)))
+    search = GridSearchCV(
+        pipeline_factory(),
+        PARAM_GRID,
+        cv=GroupKFold(n_splits=n_inner),
+        scoring="r2",
+        n_jobs=1,  # parallelism happens across outer folds instead, see loso_generic
+    )
+    search.fit(X_train, y_train, groups=groups_train)
+    return search.predict(X_test), y_test
+
+
 def loso_generic(
     X: np.ndarray, y: np.ndarray, groups: np.ndarray, pipeline_factory
 ) -> tuple[np.ndarray, np.ndarray]:
-    """LOSO predictions for an ElasticNet pipeline, alpha/l1_ratio tuned per fold."""
-    logo = LeaveOneGroupOut()
-    y_true_all, y_pred_all = [], []
-    for train_idx, test_idx in logo.split(X, y, groups):
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-        groups_train = groups[train_idx]
+    """LOSO predictions for an ElasticNet pipeline, alpha/l1_ratio tuned per fold.
 
-        n_inner = min(N_INNER_SPLITS, len(set(groups_train)))
-        search = GridSearchCV(
-            pipeline_factory(),
-            PARAM_GRID,
-            cv=GroupKFold(n_splits=n_inner),
-            scoring="r2",
-            n_jobs=1,
-        )
-        search.fit(X_train, y_train, groups=groups_train)
-        y_pred_all.extend(search.predict(X_test))
-        y_true_all.extend(y_test)
-    return np.array(y_true_all), np.array(y_pred_all)
+    The 51/31 outer LOSO folds are independent, so they run as one
+    Parallel(n_jobs=-1) dispatch instead of a sequential loop. This is
+    not the same mistake the very first version of this script made
+    (GridSearchCV(n_jobs=-1) *inside* the loop, which respawned a
+    worker pool per call, 164 calls total, and effectively hung on
+    Windows process-spawn overhead): here there is exactly one pool per
+    loso_generic call, reused across every fold dispatched to it, with
+    each fold's own GridSearchCV forced to n_jobs=1 so the parallelism
+    only happens at the outer level.
+    """
+    logo = LeaveOneGroupOut()
+    splits = list(logo.split(X, y, groups))
+    results = Parallel(n_jobs=-1)(
+        delayed(_fit_one_fold)(train_idx, test_idx, X, y, groups, pipeline_factory)
+        for train_idx, test_idx in splits
+    )
+    y_pred_all = np.concatenate([pred for pred, _ in results])
+    y_true_all = np.concatenate([true for _, true in results])
+    return y_true_all, y_pred_all
 
 
 def loso_elasticnet(
