@@ -22,9 +22,11 @@ Two problems that a naive version of this analysis gets wrong, and that this pro
 - `scripts/download_data.py` downloads the merged HMP2/IBDMDB cohort tables (clinical metadata, MetaPhlAn species-level taxonomy, HUMAnN pathway/EC functional profiles, metabolomics BIOM) from ibdmdb.org's Globus-backed file store. There is no public API or manifest for this, so the URLs were found by hand-scraping the site's product pages, then verified with `HEAD` requests before being hardcoded.
 - `scripts/eda.py` establishes real feature and sample counts before any modeling, and resolves the open single- vs multi-omic question with actual numbers instead of assumption: 578 species-level taxa, 22,113 pathways, and 167,854 ECs against 130 subjects, meaning regularization is mandatory either way. Only 30% of metagenomics timepoints (473/1585) have a same-week paired metabolomics sample, so metabolomics fusion was deferred rather than cutting the modeling set by 70% up front.
 - `src/flare_forecast/data.py` builds diagnosis-specific datasets around a fact confirmed empirically: HBI and SCCAI are different instruments scored for different diagnoses (689/693 non-null HBI rows are Crohn's, 436/452 non-null SCCAI rows are ulcerative colitis). `build_baseline_dataset` (same-timepoint) and `build_forecast_dataset` (2-4-week-ahead (t, t+1) pairs, built from every same-subject timepoint gap in that window, not just consecutive visits, since HMP2's sampling is irregular) never pool the two scores onto one shared scale.
-- `scripts/train_forecast.py` compares six predictors under leave-one-subject-out CV: naive persistence, a fitted score-only linear regression, ElasticNet on raw species abundance, ElasticNet on species plus score, and both again on `ecology.py`'s low-dimensional summary features. The last two exist because the species-only combined model turned out not to be using the microbiome at all.
+- `scripts/train_forecast.py` compares eight predictors under leave-one-subject-out CV: naive persistence, a fitted score-only linear regression, and three microbiome representations (raw species, `ecology.py`'s low-dimensional summary features, HUMAnN pathway abundance), each alone and combined with score_t. The extra representations exist because the species-only combined model turned out not to be using the microbiome at all. The 51/31 outer LOSO folds run through a single `joblib.Parallel(n_jobs=-1)` dispatch rather than sequentially, since they are independent; a full run went from 30-45 minutes to a few minutes after that change.
 - `scripts/shap_plausibility.py` checks what the "combined" ElasticNet actually learned: SHAP values (`shap.LinearExplainer`) plus a direct nonzero-coefficient count, checked against a reference list of IBD-associated taxa from the literature (Enterobacteriaceae and *R. gnavus* overrepresentation, depleted butyrate producers, per Lloyd-Price et al. 2019). It found that the cross-validated hyperparameter search prefers pure-Lasso regularization strong enough to zero out nearly every species coefficient, 0 of 123 nonzero for Crohn's and 2 of 121 for UC.
 - `src/flare_forecast/ecology.py` computes a real dysbiosis score (median Bray-Curtis dissimilarity to a 429-sample, 27-subject non-IBD reference cohort, the same construct Lloyd-Price et al. used, reimplemented here since per-sample scores are not in the raw downloads), plus Shannon diversity and species richness, as a roughly 7-feature alternative to 578 raw species competing for signal at 51-83 training subjects.
+- `load_pathway_abundance()` reads the 476 unstratified (community-level) pathways out of the HUMAnN table, dropping the per-species stratified rows and the UNMAPPED/UNINTEGRATED catch-alls. `build_forecast_dataset` takes a `feature_loader` argument rather than hardcoding species, so the same (t, t+1) pairing logic serves all three microbiome representations instead of being copied three times.
+- `load_named_metabolites()` filters the metabolomics BIOM table (81,867 raw features, JSON-format BIOM 1.0 despite the `.gz` name) down to the 592 that carry an actual compound name. `build_forecast_dataset_metabolomics` restricts pairs to source timepoints with a same-week paired sample, the ~30% subset `eda.py` found, run as an opt-in enrichment pass (`train_forecast.py --metabolomics`) rather than folded into the main comparison, since it is evaluated on a genuinely smaller set of subjects.
 - Every model comparison and the SHAP audit results get written to `results/forecast.json`, so they can be checked later instead of just printed and lost.
 - `scripts/trajectory_viewer.py` plots `score_regression`'s predictions against real activity-score timelines for held-out subjects, not a microbiome model, since that is the model that actually won the comparison. It picks three subjects by leave-one-subject-out mean absolute error: best, median, and worst, so the figure cannot be read as a cherry-picked good example.
 
@@ -74,13 +76,19 @@ pathways: 22113 features
 ECs: 167854 features
 ```
 
-Then, to run the full forecasting comparison (about 20-25 minutes: leave-one-subject-out CV with a nested hyperparameter search per fold, across six models and two diagnoses):
+Then, to run the full forecasting comparison (a few minutes: leave-one-subject-out CV with a nested hyperparameter search per fold, across eight models and two diagnoses, parallelized across outer LOSO folds):
 
 ```bash
 python scripts/train_forecast.py
 ```
 
-Results land in `results/forecast.json`. See Validation/Results below for the actual numbers.
+Results land in `results/forecast.json`. Add `--metabolomics` to also run the opt-in enrichment pass over the ~30% paired-sample subset, written to `results/forecast_metabolomics.json`:
+
+```bash
+python scripts/train_forecast.py --metabolomics
+```
+
+See Validation/Results below for the actual numbers.
 
 The transform and feature-engineering logic (`features.py`, `ecology.py`) has unit tests that do not need the downloaded data:
 
@@ -96,16 +104,17 @@ flare-forecast/
 │   ├── download_data.py       # Pulls merged HMP2/IBDMDB tables from ibdmdb.org's Globus store
 │   ├── eda.py                 # Feature/sample-count audit; resolves the single- vs multi-omic call
 │   ├── train_baseline.py      # Same-timepoint HBI/SCCAI regression (cross-sectional baseline)
-│   ├── train_forecast.py      # 2-4wk-ahead forecast: persistence vs. score-only vs. species vs. ecology
+│   ├── train_forecast.py      # 2-4wk forecast: persistence vs. score-only vs. species/ecology/pathway
 │   ├── shap_plausibility.py   # SHAP + coefficient audit of what the "combined" model actually learned
 │   └── trajectory_viewer.py   # Predicted vs. actual score_regression trajectories, held-out subjects
 ├── src/flare_forecast/
-│   ├── data.py                 # Metadata/taxonomy loading, dataset builders, (t, t+1) pair construction
-│   ├── features.py             # PrevalenceFilter, ArcsinSqrtTransform (compositional preprocessing)
+│   ├── data.py                 # Metadata/feature loading, dataset builders, (t, t+1) pair construction
+│   ├── features.py             # PrevalenceFilter, ArcsinSqrtTransform, Log1pTransform (preprocessing)
 │   └── ecology.py              # Shannon diversity, richness, Bray-Curtis dysbiosis score
 ├── results/
-│   ├── forecast.json           # LOSO R^2/MAE per model, written by train_forecast.py
-│   └── trajectories/           # PNGs written by trajectory_viewer.py
+│   ├── forecast.json               # LOSO R^2/MAE per model, written by train_forecast.py
+│   ├── forecast_metabolomics.json  # Same, for the --metabolomics enrichment pass
+│   └── trajectories/               # PNGs written by trajectory_viewer.py
 ├── data/
 │   ├── raw/                    # Downloaded HMP2 source tables (gitignored, ~281MB)
 │   └── processed/              # Reserved for derived artifacts (unused so far)
@@ -127,12 +136,25 @@ flare-forecast/
 | combined (species + score_t) | 0.299 | 0.327 |
 | ecology only (diversity/richness/dysbiosis) | -0.045 | -0.111 |
 | ecology_combined (ecology + score_t) | 0.322 | 0.346 |
+| pathway only (476 HUMAnN pathways) | -0.065 | -0.137 |
+| pathway_combined (pathway + score_t) | 0.296 | 0.313 |
 
-Neither raw species composition nor derived ecological state, diversity, richness, a Bray-Curtis dysbiosis score, and their deltas from the prior visit, improves 2-4-week activity forecasts beyond a plain fitted regression on today's score alone. This holds for both diagnoses under leave-one-subject-out validation. Both microbiome representations underperform persistence on their own, and both combined variants land at or slightly below `score_regression`, never clearly above it.
+None of the three microbiome representations, raw species composition, derived ecological state (diversity, richness, a Bray-Curtis dysbiosis score, and their deltas from the prior visit), or functional pathway abundance, improves 2-4-week activity forecasts beyond a plain fitted regression on today's score alone. This holds for both diagnoses under leave-one-subject-out validation. All three underperform persistence on their own, and all three combined variants land at or slightly below `score_regression`, never clearly above it.
 
 This was not the first framing tried. An earlier run reported that the combined model beat naive persistence, 0.300 against 0.194, which looked like real microbiome signal. A SHAP audit (`shap_plausibility.py`) showed otherwise: the fitted model's species coefficients were nearly all zero, 0 of 123 for CD and 2 of 121 for UC. The gain was not coming from the microbiome. Instead, it came from a learned slope and intercept on score_t, something naive persistence never gets credit for since it forces slope=1. `score_regression` was added specifically to make that comparison fair.
 
-The ecology feature set came afterward, built on the idea that 578 raw species might simply be too high-dimensional for 51-83 subjects to find signal in, even if that signal exists. Checking its fitted coefficients directly shows the same pattern: mostly zero, with small weight on one to three ecology features and dominant weight on score_t. For CD, the score_t coefficient is 1.45 against a dysbiosis_t of -0.08, with everything else at exactly zero. For UC, score_t sits at 1.20 against three small nonzero ecology terms. Two different feature representations, raw species and derived ecology, arrived at the same conclusion.
+The ecology and pathway feature sets came afterward, on the idea that 578 raw species, or 476 pathways, might simply be too high-dimensional for 51-83 subjects to find signal in, even if that signal exists. Checking ecology's fitted coefficients directly shows the same pattern the species model showed: mostly zero, with small weight on one to three ecology features and dominant weight on score_t. For CD, the score_t coefficient is 1.45 against a dysbiosis_t of -0.08, with everything else at exactly zero. For UC, score_t sits at 1.20 against three small nonzero ecology terms. Three different feature representations, taxonomic composition, derived ecology, and functional pathways, arrived at the same conclusion.
+
+**Metabolomics enrichment pass** (`train_forecast.py --metabolomics`, same LOSO setup, restricted to the ~30% of timepoints with a same-week paired metabolomics sample: 193 CD and 134 UC (t, t+1) pairs, 46 and 28 subjects):
+
+| model | CD R² | UC R² |
+|---|---|---|
+| persistence (subset) | 0.225 | 0.397 |
+| score_regression (subset, fitted, no microbiome) | **0.298** | **0.444** |
+| metabolomics only (592 named compounds) | -0.073 | -0.038 |
+| metabolomics_combined (metabolomics + score_t) | 0.269 | 0.404 |
+
+Same pattern a fourth time. On this smaller paired subset, persistence and score_regression baselines are recomputed rather than reused from the full-set table above, since they are evaluated on a different population, but metabolomics alone still underperforms persistence and metabolomics_combined still lands at or below score_regression for both diagnoses.
 
 A few caveats apply regardless of the exact numbers above. 51-83 training subjects per diagnosis means every LOSO fold is a substantial share of the data, so reported R² carries real variance. HBI and SCCAI are noisy self-report clinical instruments, not lab measurements, which caps how predictable they can be from any input. And the source paper for this cohort never reports a forecasting R² to compare against, since it is a cross-sectional analysis. There is no strong external number for what "good" looks like here.
 
@@ -155,18 +177,25 @@ data/raw/  --  hmp2_metadata_2018-08-20.csv, taxonomic_profiles_3.tsv.gz, ...
       v
 species-level relative abundance (578 taxa) x clinical metadata (HBI/SCCAI, week_num, Participant ID)
       |
-      +-- build_baseline_dataset -------------> train_baseline.py
-      |                                          (same-timepoint ElasticNet, GroupKFold(5))
+      +-- build_baseline_dataset --------------------> train_baseline.py
+      |                                                 (same-timepoint ElasticNet, GroupKFold(5))
       |
-      +-- build_forecast_dataset(_ecology) ---> train_forecast.py
-                                                   |  6 models x LeaveOneGroupOut(Participant ID)
-                                                   v
-                                             results/forecast.json
-                                                   |
-                                                   v
-                                        shap_plausibility.py
-                                        (single full-data fit; SHAP values +
-                                         nonzero-coefficient audit of "combined")
+      +-- build_forecast_dataset(feature_loader=      train_forecast.py
+      |     species | ecology | pathway) ------------>   |  8 models x LeaveOneGroupOut(Participant ID)
+      |                                                   |  (joblib.Parallel across outer folds)
+      |                                                   v
+      |                                             results/forecast.json
+      |                                                   |
+      |                                                   v
+      |                                        shap_plausibility.py
+      |                                        (single full-data fit; SHAP values +
+      |                                         nonzero-coefficient audit of "combined")
+      |
+      +-- build_forecast_dataset_metabolomics --------> train_forecast.py --metabolomics
+            (load_named_metabolites(), ~30%                (opt-in enrichment pass, paired subset only)
+             paired-sample subset only)                     |
+                                                              v
+                                                results/forecast_metabolomics.json
 ```
 
 ## Prior Art
@@ -180,16 +209,17 @@ The source dataset and its original analysis are [Lloyd-Price et al. 2019, *Natu
 - An early "combined model beats persistence" result looked like a real finding. A SHAP audit caught that the model's species coefficients were nearly all zero, so a fitted score-only baseline was added to make the comparison honest.
 - Low-dimensional ecological summary features (diversity, richness, dysbiosis score, trajectory deltas) were tried as an alternative to 578 raw species, on the idea that dimensionality itself was hiding real signal. It was not. The ecology-based models show the same pattern, mostly-zero fitted coefficients and no improvement over `score_regression`, which is evidence the earlier negative result is real rather than an artifact of one particular feature representation.
 - Building the dysbiosis score turned up a real QC issue: 11 of 1638 metagenomics samples had exactly 0 abundance across all 578 species. These turned out to be failed profiling runs rather than genuine zero-diversity samples, and they had been silently included in every model up to that point. This was fixed by dropping them at the source in `load_species_taxonomy`. The shift in reported numbers was small, a handful of contaminated rows in an already-large sample, but real.
-- The first LOSO run used `GridSearchCV(n_jobs=-1)` inside the outer loop, which respawns a joblib worker pool per call, 164 calls total. That is fine on Linux but effectively hung on Windows process-spawn overhead. It was fixed by switching to `n_jobs=1`.
+- The first LOSO run used `GridSearchCV(n_jobs=-1)` inside the outer loop, which respawns a joblib worker pool per call, 164 calls total. That is fine on Linux but effectively hung on Windows process-spawn overhead. Switching to `n_jobs=1` fixed the hang but made every run sequential and slow, 30-45 minutes for the full comparison. The actual fix was parallelizing across the independent outer LOSO folds instead, one `joblib.Parallel(n_jobs=-1)` pool per model rather than one pool per fold, which cut that same run to a few minutes.
+- HUMAnN pathway abundance was tried as a third microbiome representation, on the idea that functional (not just taxonomic) signal might be there even if species-level signal was not. It was not either: `pathway` and `pathway_combined` show the same pattern as species and ecology, underperforming or matching `score_regression` at best, never beating it.
 - The patient-trajectory viewer originally planned as a stretch goal is built (`trajectory_viewer.py`, see Validation/Results above).
+- Metabolomics fusion, previously a stretch goal, is built as an opt-in enrichment pass (`train_forecast.py --metabolomics`) over the ~30% paired-sample subset, rather than folded into the primary comparison. Same result a fourth way: metabolomics alone underperforms persistence and metabolomics_combined lands at or below score_regression, for both diagnoses.
 
 **Genuine design decisions, not oversights:**
-- Single-omic (metagenomics only) for all models here. Metabolomics fusion would cut the modeling set by about 70%, since only 30% of timepoints have a paired sample, so it is deferred to a future enrichment pass over that smaller subset rather than folded into the primary models.
+- Metagenomics-primary: species, ecology, and pathway models all run on the full modeling set, and metabolomics is a separate opt-in pass, since fusing it into the primary models would cut the training set by about 70% (only 30% of timepoints have a paired sample).
 - Species-level taxonomy only, not the full kingdom-through-species rank stack in the raw file, since using every rank at once double-counts abundance. A phylum's total is simply the sum of its species.
 - HBI and SCCAI are kept diagnosis-separate rather than pooled onto one severity scale, since they are different clinical instruments scored for different diagnoses.
 
 **Stretch goals, not started:**
-- Metabolomics fusion over the roughly 30% paired-sample subset.
 - A second, independent microbiome-IBD cohort for held-out validation. The SHAP-based plausibility check above was used instead, as a cheaper independent sanity check on the same cohort.
 
 ## License

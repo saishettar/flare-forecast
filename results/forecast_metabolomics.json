@@ -1,0 +1,48 @@
+[
+  {
+    "diagnosis": "CD",
+    "n_pairs": 193,
+    "n_subjects": 46,
+    "models": {
+      "persistence (subset)": {
+        "r2": 0.22546042116943643,
+        "mae": 1.4585492227979275
+      },
+      "score_regression (subset)": {
+        "r2": 0.2980042304095991,
+        "mae": 1.4557177219093982
+      },
+      "metabolomics": {
+        "r2": -0.07260388068621482,
+        "mae": 2.011376692406261
+      },
+      "metabolomics_combined": {
+        "r2": 0.26897301939867335,
+        "mae": 1.5645024213011833
+      }
+    }
+  },
+  {
+    "diagnosis": "UC",
+    "n_pairs": 134,
+    "n_subjects": 28,
+    "models": {
+      "persistence (subset)": {
+        "r2": 0.39653073247365334,
+        "mae": 1.1044776119402986
+      },
+      "score_regression (subset)": {
+        "r2": 0.44417956184037877,
+        "mae": 1.182862783645281
+      },
+      "metabolomics": {
+        "r2": -0.0381785292365755,
+        "mae": 1.6977408017044178
+      },
+      "metabolomics_combined": {
+        "r2": 0.4038274859008377,
+        "mae": 1.236064368669088
+      }
+    }
+  }
+]
